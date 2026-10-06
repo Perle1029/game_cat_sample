@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ねこよけ</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #1b1530;
+    font-family: "Hiragino Maru Gothic ProN", "Meiryo", sans-serif;
+    color: #fff;
+  }
+  #wrap {
+    position: relative;
+    width: 480px;
+    height: 640px;
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+  }
+  canvas { display: block; }
+  #hud {
+    position: absolute;
+    top: 10px;
+    left: 14px;
+    right: 14px;
+    display: flex;
+    justify-content: space-between;
+    font-size: 18px;
+    font-weight: bold;
+    text-shadow: 0 2px 4px rgba(0, 0, 0, 0.6);
+    pointer-events: none;
+  }
+  .overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    background: rgba(20, 12, 40, 0.75);
+    text-align: center;
+  }
+  .hidden { display: none; }
+  h1 { margin: 0; font-size: 48px; letter-spacing: 4px; }
+  h2 { margin: 0; font-size: 44px; color: #ff6b81; }
+  p { margin: 0; font-size: 18px; line-height: 1.6; }
+  .big { font-size: 28px; font-weight: bold; }
+  button {
+    margin-top: 10px;
+    padding: 12px 40px;
+    font-size: 22px;
+    font-weight: bold;
+    font-family: inherit;
+    color: #2a1a4a;
+    background: #ffd166;
+    border: none;
+    border-radius: 999px;
+    cursor: pointer;
+    box-shadow: 0 4px 0 #c99a2e;
+  }
+  button:hover { background: #ffe08a; }
+  button:active { transform: translateY(3px); box-shadow: 0 1px 0 #c99a2e; }
+  .hint { font-size: 14px; opacity: 0.7; }
+  #muteBtn {
+    position: absolute;
+    right: 10px;
+    bottom: 10px;
+    z-index: 10;
+    margin: 0;
+    padding: 6px 12px;
+    font-size: 14px;
+    color: #fff;
+    background: rgba(255, 255, 255, 0.15);
+    box-shadow: none;
+  }
+  #muteBtn:hover { background: rgba(255, 255, 255, 0.3); }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="480" height="640"></canvas>
+  <div id="hud">
+    <span>スコア: <span id="score">0</span></span>
+    <span>ハイスコア: <span id="best">0</span></span>
+  </div>
+  <button id="muteBtn" title="M キーでも切り替え">🔊 音あり</button>
+
+  <div id="startScreen" class="overlay">
+    <h1>🐭 ねこよけ 🐱</h1>
+    <p>ネズミを動かして、上から落ちてくる猫をよけよう！</p>
+    <p>矢印キー ← → ↑ ↓ で移動</p>
+    <button id="startBtn">スタート</button>
+    <p class="hint">Enter / Space でも開始できます</p>
+  </div>
+
+  <div id="overScreen" class="overlay hidden">
+    <h2>GAME OVER</h2>
+    <p>スコア</p>
+    <p class="big" id="finalScore">0</p>
+    <p>ハイスコア: <span id="finalBest">0</span></p>
+    <p id="newRecord" class="hidden" style="color:#ffd166;">★ 新記録！ ★</p>
+    <button id="retryBtn">リトライ</button>
+    <p class="hint">Enter / Space でもリトライできます</p>
+  </div>
+</div>
+
+<script>
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const W = canvas.width;
+const H = canvas.height;
+
+const scoreEl = document.getElementById("score");
+const bestEl = document.getElementById("best");
+const startScreen = document.getElementById("startScreen");
+const overScreen = document.getElementById("overScreen");
+const finalScoreEl = document.getElementById("finalScore");
+const finalBestEl = document.getElementById("finalBest");
+const newRecordEl = document.getElementById("newRecord");
+
+const CAT_COLORS = [
+  { body: "#f4a259", stripe: "#d9822b" }, // 茶トラ
+  { body: "#3a3a3a", stripe: null },      // 黒
+  { body: "#f5f5f5", stripe: null },      // 白
+  { body: "#9e9e9e", stripe: "#7a7a7a" }, // グレー縞
+  { body: "#e8c39e", stripe: "#c79f74" }, // クリーム
+];
+
+// 背景の星（固定）
+const stars = Array.from({ length: 60 }, () => ({
+  x: Math.random() * W,
+  y: Math.random() * H,
+  r: Math.random() * 1.5 + 0.3,
+  t: Math.random() * Math.PI * 2,
+}));
+
+let state = "start";
+let player, cats, score, elapsed, spawnTimer, lastTime;
+const keys = {};
+
+let best = 0;
+try { best = Number(localStorage.getItem("nekoyoke-best")) || 0; } catch (e) {}
+bestEl.textContent = best;
+
+// ---------- 効果音（Web Audio で合成） ----------
+
+let audioCtx = null;
+let muted = false;
+try { muted = localStorage.getItem("nekoyoke-muted") === "1"; } catch (e) {}
+const muteBtn = document.getElementById("muteBtn");
+
+function updateMuteBtn() {
+  muteBtn.textContent = muted ? "🔇 音なし" : "🔊 音あり";
+}
+
+function toggleMute() {
+  muted = !muted;
+  try { localStorage.setItem("nekoyoke-muted", muted ? "1" : "0"); } catch (e) {}
+  updateMuteBtn();
+}
+
+// ブラウザの制限により、ユーザー操作のタイミングで初期化する
+function initAudio() {
+  if (!audioCtx) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (AC) audioCtx = new AC();
+  }
+  if (audioCtx && audioCtx.state === "suspended") audioCtx.resume();
+}
+
+// 単音を鳴らす。slide があれば周波数をその値へ滑らせる
+function tone(freq, dur, { type = "sine", gain = 0.15, delay = 0, slide = null, filter = null } = {}) {
+  if (muted || !audioCtx) return;
+  const t0 = audioCtx.currentTime + delay;
+  const osc = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  osc.type = type;
+  osc.frequency.setValueAtTime(freq, t0);
+  if (slide) {
+    for (const [f, at] of slide) osc.frequency.linearRampToValueAtTime(f, t0 + at);
+  }
+  g.gain.setValueAtTime(0.0001, t0);
+  g.gain.exponentialRampToValueAtTime(gain, t0 + 0.01);
+  g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+  let node = osc;
+  if (filter) {
+    const f = audioCtx.createBiquadFilter();
+    f.type = "lowpass";
+    f.frequency.value = filter;
+    osc.connect(f);
+    node = f;
+  }
+  node.connect(g).connect(audioCtx.destination);
+  osc.start(t0);
+  osc.stop(t0 + dur + 0.05);
+}
+
+const sfx = {
+  start() {
+    [523, 659, 784, 1047].forEach((f, i) => tone(f, 0.12, { type: "square", gain: 0.08, delay: i * 0.08 }));
+  },
+  dodge() {
+    tone(1100 + Math.random() * 400, 0.06, { gain: 0.04 });
+  },
+  milestone() {
+    tone(1319, 0.1, { type: "triangle", gain: 0.12 });
+    tone(1760, 0.18, { type: "triangle", gain: 0.12, delay: 0.08 });
+  },
+  gameOver() {
+    // ネズミの「チュッ！」
+    tone(2200, 0.12, { gain: 0.12, slide: [[2800, 0.05], [1800, 0.12]] });
+    // 猫の「ニャ〜」
+    tone(520, 0.7, {
+      type: "sawtooth", gain: 0.14, delay: 0.15, filter: 1600,
+      slide: [[780, 0.15], [700, 0.4], [430, 0.7]],
+    });
+    // しょんぼり下降音
+    [392, 330, 262].forEach((f, i) => tone(f, 0.25, { type: "triangle", gain: 0.12, delay: 0.95 + i * 0.2 }));
+  },
+  newRecord() {
+    [784, 988, 1175, 1568].forEach((f, i) => tone(f, 0.15, { type: "square", gain: 0.07, delay: 1.7 + i * 0.1 }));
+  },
+};
+
+updateMuteBtn();
+muteBtn.addEventListener("click", (e) => {
+  initAudio();
+  toggleMute();
+  e.currentTarget.blur(); // Space キーで再度押されないように
+});
+
+function reset() {
+  player = { x: W / 2, y: H - 70, r: 16, speed: 300 };
+  cats = [];
+  score = 0;
+  elapsed = 0;
+  spawnTimer = 0;
+}
+
+function startGame() {
+  if (state === "playing") return;
+  initAudio();
+  sfx.start();
+  reset();
+  state = "playing";
+  startScreen.classList.add("hidden");
+  overScreen.classList.add("hidden");
+  lastTime = performance.now();
+}
+
+function gameOver() {
+  state = "gameover";
+  const final = Math.floor(score);
+  const isNew = final > best;
+  if (isNew) {
+    best = final;
+    try { localStorage.setItem("nekoyoke-best", best); } catch (e) {}
+  }
+  finalScoreEl.textContent = final;
+  finalBestEl.textContent = best;
+  bestEl.textContent = best;
+  newRecordEl.classList.toggle("hidden", !isNew);
+  sfx.gameOver();
+  if (isNew) sfx.newRecord();
+  overScreen.classList.remove("hidden");
+}
+
+function spawnCat() {
+  const size = 22 + Math.random() * 18; // 顔の半径
+  const difficulty = 1 + elapsed / 20;
+  cats.push({
+    x: size + Math.random() * (W - size * 2),
+    y: -size * 2,
+    size,
+    vy: (120 + Math.random() * 80) * difficulty,
+    rot: (Math.random() - 0.5) * 0.6,
+    vr: (Math.random() - 0.5) * 1.5,
+    color: CAT_COLORS[Math.floor(Math.random() * CAT_COLORS.length)],
+  });
+}
+
+function update(dt) {
+  elapsed += dt;
+  const prevHundreds = Math.floor(score / 100);
+  score += dt * 10;
+
+  // プレイヤー移動
+  let dx = 0, dy = 0;
+  if (keys.ArrowLeft) dx -= 1;
+  if (keys.ArrowRight) dx += 1;
+  if (keys.ArrowUp) dy -= 1;
+  if (keys.ArrowDown) dy += 1;
+  if (dx && dy) { dx *= Math.SQRT1_2; dy *= Math.SQRT1_2; }
+  player.x = Math.max(player.r, Math.min(W - player.r, player.x + dx * player.speed * dt));
+  player.y = Math.max(player.r, Math.min(H - player.r, player.y + dy * player.speed * dt));
+
+  // 猫の出現（時間とともに間隔が短くなる）
+  const interval = Math.max(0.25, 0.9 - elapsed * 0.015);
+  spawnTimer -= dt;
+  if (spawnTimer <= 0) {
+    spawnCat();
+    spawnTimer = interval;
+  }
+
+  // 猫の移動と当たり判定
+  for (let i = cats.length - 1; i >= 0; i--) {
+    const c = cats[i];
+    c.y += c.vy * dt;
+    c.rot += c.vr * dt;
+
+    const hitR = c.size * 0.8 + player.r * 0.8;
+    if (Math.hypot(c.x - player.x, c.y - player.y) < hitR) {
+      gameOver();
+      return;
+    }
+    if (c.y - c.size * 2 > H) {
+      cats.splice(i, 1);
+      score += 5; // よけたボーナス
+      sfx.dodge();
+    }
+  }
+
+  // 100 点ごとにチャイム
+  if (Math.floor(score / 100) > prevHundreds) sfx.milestone();
+
+  scoreEl.textContent = Math.floor(score);
+}
+
+// ---------- 描画 ----------
+
+function drawBackground(t) {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, "#2b1d5c");
+  g.addColorStop(1, "#4a2f7a");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+
+  for (const s of stars) {
+    ctx.globalAlpha = 0.5 + 0.5 * Math.sin(t / 600 + s.t);
+    ctx.fillStyle = "#fff";
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawCat(c) {
+  const s = c.size;
+  ctx.save();
+  ctx.translate(c.x, c.y);
+  ctx.rotate(c.rot);
+
+  const outline = c.color.body === "#3a3a3a" ? "#111" : "rgba(0,0,0,0.35)";
+
+  // 耳
+  ctx.fillStyle = c.color.body;
+  ctx.strokeStyle = outline;
+  ctx.lineWidth = 2;
+  for (const side of [-1, 1]) {
+    ctx.beginPath();
+    ctx.moveTo(side * s * 0.85, -s * 0.25);
+    ctx.lineTo(side * s * 0.75, -s * 1.15);
+    ctx.lineTo(side * s * 0.15, -s * 0.8);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    // 内耳
+    ctx.fillStyle = "#ff9eb5";
+    ctx.beginPath();
+    ctx.moveTo(side * s * 0.7, -s * 0.45);
+    ctx.lineTo(side * s * 0.68, -s * 0.95);
+    ctx.lineTo(side * s * 0.3, -s * 0.75);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = c.color.body;
+  }
+
+  // 顔
+  ctx.beginPath();
+  ctx.ellipse(0, 0, s, s * 0.88, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+
+  // 縞模様
+  if (c.color.stripe) {
+    ctx.strokeStyle = c.color.stripe;
+    ctx.lineWidth = s * 0.1;
+    ctx.lineCap = "round";
+    for (const off of [-0.25, 0, 0.25]) {
+      ctx.beginPath();
+      ctx.moveTo(off * s, -s * 0.8);
+      ctx.lineTo(off * s * 0.8, -s * 0.5);
+      ctx.stroke();
+    }
+  }
+
+  // 目
+  const eyeColor = c.color.body === "#3a3a3a" ? "#f7e15a" : "#2b2b2b";
+  ctx.fillStyle = eyeColor;
+  for (const side of [-1, 1]) {
+    ctx.beginPath();
+    ctx.ellipse(side * s * 0.38, -s * 0.12, s * 0.12, s * 0.17, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.fillStyle = "#fff";
+  for (const side of [-1, 1]) {
+    ctx.beginPath();
+    ctx.arc(side * s * 0.38 + s * 0.04, -s * 0.18, s * 0.045, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // 鼻
+  ctx.fillStyle = "#ff7b9c";
+  ctx.beginPath();
+  ctx.moveTo(-s * 0.09, s * 0.12);
+  ctx.lineTo(s * 0.09, s * 0.12);
+  ctx.lineTo(0, s * 0.22);
+  ctx.closePath();
+  ctx.fill();
+
+  // 口
+  ctx.strokeStyle = c.color.body === "#3a3a3a" ? "#ddd" : "#333";
+  ctx.lineWidth = 1.5;
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.moveTo(0, s * 0.22);
+  ctx.quadraticCurveTo(-s * 0.1, s * 0.38, -s * 0.2, s * 0.3);
+  ctx.moveTo(0, s * 0.22);
+  ctx.quadraticCurveTo(s * 0.1, s * 0.38, s * 0.2, s * 0.3);
+  ctx.stroke();
+
+  // ひげ
+  ctx.lineWidth = 1.2;
+  for (const side of [-1, 1]) {
+    for (const k of [-1, 0, 1]) {
+      ctx.beginPath();
+      ctx.moveTo(side * s * 0.35, s * 0.2 + k * s * 0.06);
+      ctx.lineTo(side * s * 1.25, s * 0.12 + k * s * 0.18);
+      ctx.stroke();
+    }
+  }
+
+  ctx.restore();
+}
+
+function drawPlayer(t) {
+  const { x, y, r } = player;
+  const BODY = "#b8b8c8";
+  const LINE = "#6e6e82";
+  const PINK = "#ffa8bf";
+
+  // 影
+  ctx.fillStyle = "rgba(0,0,0,0.25)";
+  ctx.beginPath();
+  ctx.ellipse(x, y + r + 4, r * 0.9, r * 0.3, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // しっぽ（くねくね揺れる）
+  const wag = Math.sin(t / 150) * r * 0.4;
+  ctx.strokeStyle = PINK;
+  ctx.lineWidth = 2.5;
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.moveTo(x + r * 0.6, y + r * 0.6);
+  ctx.bezierCurveTo(x + r * 1.5, y + r * 1.0, x + r * 1.2 + wag, y - r * 0.2,
+                    x + r * 1.7 + wag, y - r * 0.5);
+  ctx.stroke();
+
+  // 耳（大きくて丸い）
+  ctx.lineWidth = 2;
+  for (const side of [-1, 1]) {
+    ctx.fillStyle = BODY;
+    ctx.strokeStyle = LINE;
+    ctx.beginPath();
+    ctx.arc(x + side * r * 0.75, y - r * 0.75, r * 0.6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = PINK;
+    ctx.beginPath();
+    ctx.arc(x + side * r * 0.75, y - r * 0.75, r * 0.38, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // 顔（下すぼまりの丸）
+  ctx.fillStyle = BODY;
+  ctx.strokeStyle = LINE;
+  ctx.beginPath();
+  ctx.ellipse(x, y, r * 0.95, r, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+
+  // 目
+  ctx.fillStyle = "#1b1530";
+  ctx.beginPath();
+  ctx.arc(x - r * 0.35, y - r * 0.15, r * 0.14, 0, Math.PI * 2);
+  ctx.arc(x + r * 0.35, y - r * 0.15, r * 0.14, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#fff";
+  ctx.beginPath();
+  ctx.arc(x - r * 0.31, y - r * 0.2, r * 0.05, 0, Math.PI * 2);
+  ctx.arc(x + r * 0.39, y - r * 0.2, r * 0.05, 0, Math.PI * 2);
+  ctx.fill();
+
+  // 鼻
+  ctx.fillStyle = "#ff6f91";
+  ctx.beginPath();
+  ctx.arc(x, y + r * 0.3, r * 0.14, 0, Math.PI * 2);
+  ctx.fill();
+
+  // ひげ
+  ctx.strokeStyle = LINE;
+  ctx.lineWidth = 1;
+  for (const side of [-1, 1]) {
+    for (const k of [-1, 1]) {
+      ctx.beginPath();
+      ctx.moveTo(x + side * r * 0.2, y + r * 0.32);
+      ctx.lineTo(x + side * r * 1.15, y + r * 0.32 + k * r * 0.2);
+      ctx.stroke();
+    }
+  }
+}
+
+function draw(t) {
+  drawBackground(t);
+  if (cats) for (const c of cats) drawCat(c);
+  if (player) drawPlayer(t);
+}
+
+function loop(now) {
+  if (state === "playing") {
+    const dt = Math.min(0.05, (now - lastTime) / 1000);
+    lastTime = now;
+    update(dt);
+  }
+  draw(now);
+  requestAnimationFrame(loop);
+}
+
+// ---------- 入力 ----------
+
+window.addEventListener("keydown", (e) => {
+  if (e.key.startsWith("Arrow") || e.key === " ") e.preventDefault();
+  keys[e.key] = true;
+  if (e.key === "m" || e.key === "M") { initAudio(); toggleMute(); }
+  if ((e.key === "Enter" || e.key === " ") && state !== "playing") {
+    e.preventDefault(); // フォーカス中のボタンとの二重起動を防ぐ
+    startGame();
+  }
+});
+window.addEventListener("keyup", (e) => { keys[e.key] = false; });
+window.addEventListener("blur", () => { for (const k in keys) keys[k] = false; });
+
+document.getElementById("startBtn").addEventListener("click", startGame);
+document.getElementById("retryBtn").addEventListener("click", startGame);
+
+reset();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
